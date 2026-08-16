@@ -1,0 +1,21 @@
+{
+  "armed": false,
+  "risk_pct": 1.0,
+  "symbols": {
+    "XAUUSDm": {
+      "last_closed_bar_time": "2026-08-14T20:50:00+00:00",
+      "acted_signals": [],
+      "position": null
+    },
+    "XAGUSDm": {
+      "last_closed_bar_time": "2026-08-14T20:50:00+00:00",
+      "acted_signals": [],
+      "position": null
+    },
+    "USTECm": {
+      "last_closed_bar_time": "2026-08-14T20:45:00+00:00",
+      "acted_signals": [],
+      "position": null
+    }
+  }
+}
