@@ -5,6 +5,8 @@ import pandas as pd
 import streamlit as st
 
 TIMEFRAME_MAP = {
+    "MN1": mt5.TIMEFRAME_MN1,
+    "W1": mt5.TIMEFRAME_W1,
     "D1": mt5.TIMEFRAME_D1,
     "H4": mt5.TIMEFRAME_H4,
     "H1": mt5.TIMEFRAME_H1,
@@ -33,7 +35,7 @@ def shutdown() -> None:
     mt5.shutdown()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=10, show_spinner=False)
 def get_rates(symbol: str, timeframe_key: str, bars: int = 300) -> pd.DataFrame:
     """Fetch the most recent `bars` candles for symbol/timeframe as a DataFrame."""
     timeframe = TIMEFRAME_MAP[timeframe_key]
