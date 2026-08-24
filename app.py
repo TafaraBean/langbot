@@ -9,7 +9,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import journal
+import live_engine
+import live_state
 import mt5_data
+import mt5_trade
 import sessions
 import structure
 
@@ -430,9 +433,9 @@ with st.sidebar.expander("Effectiveness killers"):
 """)
 
 st.title("75x Trading Framework")
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "1 · Bias & Narrative", "2 · Point of Interest", "3 · Confirmation", "4 · Setup & Journal",
-    "5 · POI Backtest Results", "6 · Portfolio",
+    "5 · POI Backtest Results", "6 · Portfolio", "7 · Live Trading",
 ])
 
 # ---------------------------------------------------------- Tab 1: Bias ----
@@ -1133,4 +1136,187 @@ with tab6:
         if best["_equity"]:
             st.caption(f"Best combination: {best['TP ladder']} ladder, {best['Scale-out']} scale-out, HP min {best['HP min']}.")
             st.line_chart(pd.Series(best["_equity"]).cumsum().reset_index(drop=True))
+
+# ----------------------------------------------- Tab 7: Live Trading -------
+with tab7:
+    st.caption("Runs the exact same Bias -> Narrative -> POI -> Confirmation pipeline as Tab 6, "
+               f"live against {', '.join(live_engine.SYMBOLS)}, placing REAL orders on the connected "
+               "account when armed. Nothing here is simulated once armed - treat it accordingly.")
+
+    _live_state_seed = live_state.load_state()
+
+    acct = mt5_trade.get_account_info()
+    demo_ok, demo_msg = mt5_trade.is_demo_account()
+
+    if acct:
+        st.markdown(
+            f"**Account:** #{acct['login']} on {acct['server']} &nbsp;&middot;&nbsp; "
+            f"**Balance:** {acct['balance']:.2f} {acct['currency']} &nbsp;&middot;&nbsp; "
+            f"**Equity:** {acct['equity']:.2f} {acct['currency']}",
+            unsafe_allow_html=True,
+        )
+    if demo_ok:
+        st.success(demo_msg)
+    else:
+        st.error(demo_msg)
+
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        live_risk_pct = st.number_input("Risk % of balance per trade", min_value=0.1, max_value=5.0,
+                                         value=float(_live_state_seed.get("risk_pct", 1.0)), step=0.1,
+                                         key="live_risk_pct")
+    with lc2:
+        live_refresh_secs = st.selectbox("Poll interval (seconds)", [15, 20, 30], index=1, key="live_refresh_secs")
+
+    lc3, lc4 = st.columns(2)
+    with lc3:
+        live_tp_ladder_name = st.selectbox(
+            "TP ladder preset", list(TP_LADDER_PRESETS.keys()),
+            index=list(TP_LADDER_PRESETS.keys()).index(live_engine.DEFAULT_TP_LADDER_PRESET),
+            key="live_tp_ladder",
+        )
+    with lc4:
+        live_tp_fraction_name = st.selectbox(
+            "Scale-out preset", list(TP_FRACTION_PRESETS.keys()),
+            index=list(TP_FRACTION_PRESETS.keys()).index(live_engine.DEFAULT_TP_FRACTION_PRESET),
+            key="live_tp_fraction",
+        )
+
+    lc5, lc6 = st.columns(2)
+    with lc5:
+        live_min_hp_score = st.selectbox(
+            "HP score minimum", [0, 1, 2, 3, 4],
+            index=[0, 1, 2, 3, 4].index(live_engine.DEFAULT_MIN_HP_SCORE),
+            key="live_min_hp_score",
+        )
+    with lc6:
+        live_min_rr = st.number_input("Minimum R:R", min_value=0.5, max_value=5.0,
+                                       value=live_engine.DEFAULT_MIN_RR, step=0.1, key="live_min_rr")
+
+    st.caption("Defaults to the best result from your last portfolio optimization run "
+               "(Tight ladder / Back-loaded scale-out / HP≥2 / R:R≥2, risk-adjusted score 7.32).")
+
+    live_tp_pips = TP_LADDER_PRESETS[live_tp_ladder_name]
+    live_tp_fractions = TP_FRACTION_PRESETS[live_tp_fraction_name]
+
+    live_confirm = st.checkbox(
+        "I confirm this is a demo account and I want this tab to place real orders on it",
+        value=False, disabled=not demo_ok, key="live_confirm",
+    )
+    live_armed = st.toggle("ARM LIVE TRADING", value=False, disabled=not (demo_ok and live_confirm),
+                            key="live_armed")
+
+    if live_armed:
+        st.warning(f"ARMED - real orders will be placed on {', '.join(live_engine.SYMBOLS)} as signals confirm.")
+    else:
+        st.info("Not armed - the pipeline still runs and shows what it WOULD do, but sends nothing to MT5.")
+
+    if st.button("Flatten all & Disarm", type="primary"):
+        kill_state = live_state.load_state()
+        flattened = []
+        for sym in live_engine.SYMBOLS:
+            pos = (kill_state["symbols"].get(sym) or {}).get("position")
+            if pos:
+                mt5_trade.close_full(pos["ticket"], sym, comment="75x live kill switch")
+                live_engine.reconcile_and_journal(sym, kill_state)
+                flattened.append(sym)
+        kill_state["armed"] = False
+        live_state.save_state(kill_state)
+        st.session_state["live_armed"] = False
+        st.session_state["live_confirm"] = False
+        st.success(f"Flattened and disarmed: {', '.join(flattened)}." if flattened
+                   else "Disarmed - no open bot positions to flatten.")
+        st.rerun()
+
+    st.divider()
+
+    @st.fragment(run_every=live_refresh_secs)
+    def _live_trading_cycle():
+        state = live_state.load_state()
+        state["risk_pct"] = live_risk_pct
+        cycle = live_engine.run_cycle(state, live_risk_pct, live_armed,
+                                       prepare_symbol_data, run_mock_trade, poi_to_active_dict,
+                                       live_min_rr, live_min_hp_score, live_tp_pips, live_tp_fractions)
+
+        st.caption(f"Last cycle: {datetime.now().strftime('%H:%M:%S')} local &middot; "
+                   f"{'ARMED' if cycle['armed'] else 'not armed'} &middot; {cycle['demo_msg']}")
+
+        rows = []
+        action_log = []
+        for sym, sym_result in cycle["per_symbol"].items():
+            bias = sym_result.get("bias", {})
+            biases = bias.get("biases", {})
+            pos_status = sym_result.get("position_status")
+            signal = sym_result.get("signal")
+            recon = sym_result.get("reconcile")
+
+            if pos_status and pos_status.get("status") == "open":
+                position_desc = (f"#{pos_status['ticket']} {pos_status['direction']} "
+                                  f"{pos_status['volume_open']:.2f} lot &middot; P/L {pos_status['floating_pl']:.2f} &middot; "
+                                  f"next leg {pos_status.get('next_leg') or '-'}")
+            elif pos_status and pos_status.get("status") == "closed_pending_reconcile":
+                position_desc = "closing..."
+            else:
+                position_desc = "-"
+
+            rows.append({
+                "Symbol": sym,
+                "D1/H4/H1/M15 bias": " / ".join(biases.get(tf, "-") for tf in structure.TF_ORDER),
+                "Narrative": f"{bias.get('narrative_count', 0)}/4 {bias.get('narrative_label', '')}",
+                "Position": position_desc,
+                "Last M5 close": sym_result.get("last_bar") or "-",
+            })
+
+            if recon and recon.get("status") == "journaled":
+                action_log.append(f"{sym}: position closed - {recon['outcome']} ({recon['pnl_r']:+.2f}R), logged to live journal.")
+            elif recon:
+                action_log.append(f"{sym}: position closed, waiting for broker history to log the outcome.")
+
+            if signal and signal.get("ok") and signal.get("dry_run") is False:
+                action_log.append(f"{sym}: ENTERED {signal['direction']} {signal['volume']:.2f} lot @ "
+                                   f"{signal['entry']:.2f} (ticket {signal['ticket']}).")
+            elif signal and signal.get("ok") and signal.get("dry_run"):
+                action_log.append(f"{sym}: would enter {signal['direction']} {signal['volume']:.2f} lot @ "
+                                   f"{signal['entry']:.2f} (not armed).")
+            elif signal and not signal.get("ok"):
+                action_log.append(f"{sym}: signal found but could not enter - {signal.get('reason')}")
+
+        st.dataframe(pd.DataFrame(rows), width='stretch')
+
+        if action_log:
+            with st.expander("Action log (this cycle)", expanded=True):
+                for line in action_log:
+                    st.write(line)
+
+    _live_trading_cycle()
+
+    st.divider()
+    st.subheader("Live results")
+    live_jdf = journal.load_journal(path=live_engine.LIVE_JOURNAL_PATH)
+    st.dataframe(live_jdf, width='stretch')
+
+    live_stats = journal.stats(live_jdf)
+    if live_stats["count"]:
+        lrc1, lrc2, lrc3 = st.columns(3)
+        lrc1.metric("Live trades closed", live_stats["count"])
+        lrc2.metric("Win rate", f"{live_stats['win_rate']*100:.1f}%" if live_stats["win_rate"] is not None else "-")
+        lrc3.metric("Avg R", f"{live_stats['avg_r']:.2f}" if live_stats["avg_r"] is not None else "-")
+        if len(live_stats["equity_curve"]) > 1:
+            st.line_chart(live_stats["equity_curve"].reset_index(drop=True))
+
+        st.subheader("Per-symbol breakdown")
+        breakdown = []
+        for sym in live_jdf["symbol"].unique():
+            sub = live_jdf[live_jdf["symbol"] == sym]
+            sub_closed = sub[sub["outcome"].isin(["Win", "Loss"])]
+            sub_win_rate = (sub_closed["outcome"] == "Win").mean() if len(sub_closed) else None
+            sub_avg_r = pd.to_numeric(sub_closed["pnl_r"], errors="coerce").mean() if len(sub_closed) else None
+            breakdown.append({
+                "Symbol": sym, "Trades": len(sub),
+                "Win rate": f"{sub_win_rate*100:.1f}%" if sub_win_rate is not None else "-",
+                "Avg R": f"{sub_avg_r:.2f}" if sub_avg_r is not None else "-",
+            })
+        st.dataframe(pd.DataFrame(breakdown), width='stretch')
+    else:
+        st.info("No live trades closed yet.")
 
