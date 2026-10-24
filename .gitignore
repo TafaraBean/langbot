@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets and local config
+.env
+.claude/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
